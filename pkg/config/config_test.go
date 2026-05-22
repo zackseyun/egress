@@ -133,3 +133,15 @@ func TestValidateAndUpdateOutputParamsRejectsVideoFileMP3(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "format audio/mpeg incompatible with codec video/h264")
 }
+
+func TestCarthaH265AdvancedEncodingSelectsHEVCMP4(t *testing.T) {
+	p := &PipelineConfig{}
+	err := p.applyAdvanced(&livekit.EncodingOptions{
+		VideoCodec: carthaVideoCodecH265,
+		Width:      1920,
+		Height:     1080,
+		Framerate:  30,
+	})
+	require.NoError(t, err)
+	require.Equal(t, types.MimeTypeH265, p.VideoOutCodec)
+}

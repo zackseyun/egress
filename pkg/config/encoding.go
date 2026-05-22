@@ -20,6 +20,13 @@ import (
 	"github.com/livekit/protocol/livekit"
 )
 
+// carthaVideoCodecH265 is a Cartha-only experimental protocol extension.
+// Upstream LiveKit protocol exposes H264_* and VP8 for egress EncodingOptions
+// today; proto3 still carries unknown enum numeric values, so Cartha can send
+// VideoCodec(5) to a forked egress worker without breaking stock H264 default
+// behavior. Remove this once upstream protocol adds an official HEVC enum.
+const carthaVideoCodecH265 livekit.VideoCodec = 5
+
 func (p *PipelineConfig) applyPreset(preset livekit.EncodingOptionsPreset) {
 	switch preset {
 	case livekit.EncodingOptionsPreset_H264_720P_30:
@@ -102,6 +109,10 @@ func (p *PipelineConfig) applyAdvanced(advanced *livekit.EncodingOptions) error 
 	case livekit.VideoCodec_H264_HIGH:
 		p.VideoOutCodec = types.MimeTypeH264
 		p.VideoProfile = types.ProfileHigh
+
+	case carthaVideoCodecH265:
+		p.VideoOutCodec = types.MimeTypeH265
+		p.VideoProfile = types.ProfileMain
 	}
 
 	if advanced.Width > 0 {

@@ -674,6 +674,47 @@ func (b *VideoBin) addEncoder() error {
 		}
 		return nil
 
+	case types.MimeTypeH265:
+		x265Enc, err := gst.NewElement("x265enc")
+		if err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+
+		x265Enc.SetArg("speed-preset", "veryfast")
+
+		if b.conf.KeyFrameInterval != 0 {
+			keyframeInterval := uint(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
+			if err = x265Enc.SetProperty("key-int-max", keyframeInterval); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+		}
+
+		if err = x265Enc.SetProperty("bitrate", uint(b.conf.VideoBitrate)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+
+		h265Parse, err := gst.NewElement("h265parse")
+		if err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		// Keep parameter sets in-band so finalized MP4s are self-contained.
+		_ = h265Parse.SetProperty("config-interval", int(-1))
+
+		caps, err := gst.NewElement("capsfilter")
+		if err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		if err = caps.SetProperty("caps", gst.NewCapsFromString(
+			"video/x-h265,profile=main,stream-format=hvc1,alignment=au",
+		)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+
+		if err = b.bin.AddElements(x265Enc, h265Parse, caps); err != nil {
+			return err
+		}
+		return nil
+
 	case types.MimeTypeVP9:
 		vp9Enc, err := gst.NewElement("vp9enc")
 		if err != nil {

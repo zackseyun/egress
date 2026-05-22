@@ -715,6 +715,57 @@ func (b *VideoBin) addEncoder() error {
 		}
 		return nil
 
+	case types.MimeTypeAV1:
+		av1Enc, err := gst.NewElement("av1enc")
+		if err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+
+		// Keep the canary viable on CPU-only c7g egress nodes. AV1 quality is
+		// still better than H264 at similar bitrates, but realtime-ish settings are
+		// necessary so room recordings can finalize without falling hopelessly behind.
+		if err = av1Enc.SetProperty("usage-profile", int(1)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		if err = av1Enc.SetProperty("cpu-used", int(8)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		if err = av1Enc.SetProperty("row-mt", true); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		if err = av1Enc.SetProperty("threads", uint(0)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		if b.conf.KeyFrameInterval != 0 {
+			keyframeInterval := int(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
+			if err = av1Enc.SetProperty("keyframe-max-dist", keyframeInterval); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+		}
+		if err = av1Enc.SetProperty("target-bitrate", uint(b.conf.VideoBitrate)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+
+		av1Parse, err := gst.NewElement("av1parse")
+		if err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+
+		caps, err := gst.NewElement("capsfilter")
+		if err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		if err = caps.SetProperty("caps", gst.NewCapsFromString(
+			"video/x-av1,stream-format=obu-stream,alignment=tu",
+		)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+
+		if err = b.bin.AddElements(av1Enc, av1Parse, caps); err != nil {
+			return err
+		}
+		return nil
+
 	case types.MimeTypeVP9:
 		vp9Enc, err := gst.NewElement("vp9enc")
 		if err != nil {

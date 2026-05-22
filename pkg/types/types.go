@@ -50,6 +50,7 @@ const (
 	MimeTypeRawAudio MimeType = "audio/x-raw"
 	MimeTypeH264     MimeType = "video/h264"
 	MimeTypeH265     MimeType = "video/h265"
+	MimeTypeAV1      MimeType = "video/av1"
 	MimeTypeVP8      MimeType = "video/vp8"
 	MimeTypeVP9      MimeType = "video/vp9"
 	MimeTypeJPEG     MimeType = "image/jpeg"
@@ -154,6 +155,7 @@ var (
 			MimeTypeOpus: true,
 			MimeTypeH264: true,
 			MimeTypeH265: true,
+			MimeTypeAV1:  true,
 		},
 		OutputTypeTS: {
 			MimeTypeAAC:  true,
@@ -189,6 +191,7 @@ var (
 			MimeTypeMP3:  true,
 			MimeTypeH264: true,
 			MimeTypeH265: true,
+			MimeTypeAV1:  true,
 			MimeTypeVP8:  true,
 			MimeTypeVP9:  true,
 		},
@@ -204,6 +207,7 @@ var (
 	AllOutputVideoCodecs = map[MimeType]bool{
 		MimeTypeH264: true,
 		MimeTypeH265: true,
+		MimeTypeAV1:  true,
 	}
 
 	AudioOnlyFileOutputTypes = []OutputType{
@@ -224,6 +228,7 @@ var (
 		MimeTypePCMA: OutputTypeOGG,
 		MimeTypeH264: OutputTypeMP4,
 		MimeTypeH265: OutputTypeMP4,
+		MimeTypeAV1:  OutputTypeMP4,
 		MimeTypeVP8:  OutputTypeWebM,
 		MimeTypeVP9:  OutputTypeWebM,
 	}

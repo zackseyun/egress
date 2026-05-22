@@ -145,3 +145,15 @@ func TestCarthaH265AdvancedEncodingSelectsHEVCMP4(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, types.MimeTypeH265, p.VideoOutCodec)
 }
+
+func TestCarthaAV1AdvancedEncodingSelectsAV1MP4(t *testing.T) {
+	p := &PipelineConfig{}
+	err := p.applyAdvanced(&livekit.EncodingOptions{
+		VideoCodec: carthaVideoCodecAV1,
+		Width:      1920,
+		Height:     1080,
+		Framerate:  30,
+	})
+	require.NoError(t, err)
+	require.Equal(t, types.MimeTypeAV1, p.VideoOutCodec)
+}

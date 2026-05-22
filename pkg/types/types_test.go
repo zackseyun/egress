@@ -67,3 +67,8 @@ func TestH265IsCompatibleWithMP4Output(t *testing.T) {
 	res := GetOutputTypeCompatibleWithCodecs([]OutputType{OutputTypeMP4}, nil, map[MimeType]bool{MimeTypeH265: true})
 	require.Equal(t, OutputTypeMP4, res)
 }
+
+func TestAV1IsCompatibleWithMP4Output(t *testing.T) {
+	res := GetOutputTypeCompatibleWithCodecs([]OutputType{OutputTypeMP4}, nil, map[MimeType]bool{MimeTypeAV1: true})
+	require.Equal(t, OutputTypeMP4, res)
+}

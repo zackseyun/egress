@@ -751,6 +751,20 @@ func (b *VideoBin) addEncoder() error {
 		if err = setGstEnumProperty(av1Enc, "usage-profile", 1); err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
+		// The GStreamer av1enc defaults leave max-quantizer at 0. In realtime
+		// mode that effectively lets libaom emit near-lossless frames and ignore
+		// the requested target-bitrate, producing huge MP4s (for example 50+Mbps
+		// from a 9Mbps room request). Use realtime CBR plus a sane quantizer range
+		// so AV1 behaves like a bitrate-targeted recording codec.
+		if err = setGstEnumProperty(av1Enc, "end-usage", 1); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		if err = av1Enc.SetProperty("min-quantizer", uint(4)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		if err = av1Enc.SetProperty("max-quantizer", uint(56)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
 		if err = av1Enc.SetProperty("cpu-used", int(8)); err != nil {
 			return errors.ErrGstPipelineError(err)
 		}

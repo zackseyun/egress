@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-gst/go-glib/glib"
 	"github.com/go-gst/go-gst/gst"
 	"github.com/go-gst/go-gst/gst/app"
 	"github.com/linkdata/deadlock"
@@ -34,6 +35,20 @@ import (
 const (
 	videoTestSrcName = "video_test_src"
 )
+
+func setGstEnumProperty(element *gst.Element, name string, value int) error {
+	propType, err := element.GObject().GetPropertyType(name)
+	if err != nil {
+		return err
+	}
+	gValue, err := glib.ValueInit(propType)
+	if err != nil {
+		return err
+	}
+	defer gValue.Unset()
+	gValue.SetEnum(value)
+	return element.GObject().SetPropertyValue(name, gValue)
+}
 
 type VideoBin struct {
 	bin  *gstreamer.Bin
@@ -727,7 +742,11 @@ func (b *VideoBin) addEncoder() error {
 		// Keep the canary viable on CPU-only c7g egress nodes. AV1 quality is
 		// still better than H264 at similar bitrates, but realtime-ish settings are
 		// necessary so room recordings can finalize without falling hopelessly behind.
-		if err = av1Enc.SetProperty("usage-profile", int(1)); err != nil {
+		// usage-profile is a GstAV1EncUsageProfile enum. go-glib converts a
+		// plain int into G_TYPE_INT, which GStreamer rejects at runtime with:
+		// "invalid type gint for property usage-profile". Build a native enum
+		// GValue instead.
+		if err = setGstEnumProperty(av1Enc, "usage-profile", 1); err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
 		if err = av1Enc.SetProperty("cpu-used", int(8)); err != nil {

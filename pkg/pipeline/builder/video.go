@@ -45,7 +45,9 @@ func setGstEnumProperty(element *gst.Element, name string, value int) error {
 	if err != nil {
 		return err
 	}
-	defer gValue.Unset()
+	// ValueInit installs a runtime finalizer that calls g_value_unset/free.
+	// Calling Unset here as well double-frees the GValue later and can crash
+	// the egress process when AV1 recordings finalize.
 	gValue.SetEnum(value)
 	return element.GObject().SetPropertyValue(name, gValue)
 }

@@ -697,7 +697,13 @@ func (b *VideoBin) addEncoder() error {
 			return errors.ErrGstPipelineError(err)
 		}
 
-		x265Enc.SetArg("speed-preset", "veryfast")
+		// H265 was originally added with the same "veryfast" preset used for
+		// H264. In real RoomComposite egress that can still run behind at
+		// 1080p on the 4-vCPU canary workers, leaving the pipeline stuck in EOS
+		// finalization and eventually reported as "pipeline frozen". Prefer
+		// realtime stability over max compression for the canary path.
+		x265Enc.SetArg("speed-preset", "ultrafast")
+		x265Enc.SetArg("tune", "zerolatency")
 
 		if b.conf.KeyFrameInterval != 0 {
 			// x265enc exposes key-int-max as a signed gint, unlike x264enc's

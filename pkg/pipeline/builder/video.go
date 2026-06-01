@@ -683,7 +683,10 @@ func (b *VideoBin) addEncoder() error {
 		x265Enc.SetArg("speed-preset", "veryfast")
 
 		if b.conf.KeyFrameInterval != 0 {
-			keyframeInterval := uint(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
+			// x265enc exposes key-int-max as a signed gint, unlike x264enc's
+			// guint property. Passing uint fails the pipeline at runtime with:
+			// "invalid type guint for property key-int-max".
+			keyframeInterval := int(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
 			if err = x265Enc.SetProperty("key-int-max", keyframeInterval); err != nil {
 				return errors.ErrGstPipelineError(err)
 			}

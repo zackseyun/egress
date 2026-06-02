@@ -717,11 +717,23 @@ func (b *VideoBin) addNVENCH265Encoder() (bool, error) {
 		}
 	}
 
+	videoConvert, err := gst.NewElement("videoconvert")
+	if err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	rawCaps, err := gst.NewElement("capsfilter")
+	if err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if err = rawCaps.SetProperty("caps", gst.NewCapsFromString("video/x-raw,format=NV12")); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+
 	logger.Infow("using NVENC H265 encoder", "element", "nvautogpuh265enc", "bitrateKbps", b.conf.VideoBitrate)
-	return true, b.addH265ParserAndCaps(nvEnc)
+	return true, b.addH265ParserAndCaps(nvEnc, videoConvert, rawCaps)
 }
 
-func (b *VideoBin) addH265ParserAndCaps(encoder *gst.Element) error {
+func (b *VideoBin) addH265ParserAndCaps(encoder *gst.Element, preEncoder ...*gst.Element) error {
 	h265Parse, err := gst.NewElement("h265parse")
 	if err != nil {
 		return errors.ErrGstPipelineError(err)
@@ -739,7 +751,8 @@ func (b *VideoBin) addH265ParserAndCaps(encoder *gst.Element) error {
 		return errors.ErrGstPipelineError(err)
 	}
 
-	if err = b.bin.AddElements(encoder, h265Parse, caps); err != nil {
+	elements := append(preEncoder, encoder, h265Parse, caps)
+	if err = b.bin.AddElements(elements...); err != nil {
 		return err
 	}
 	return nil

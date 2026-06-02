@@ -16,6 +16,7 @@ package builder
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -50,6 +51,30 @@ func setGstEnumProperty(element *gst.Element, name string, value int) error {
 	// the egress process when AV1 recordings finalize.
 	gValue.SetEnum(value)
 	return element.GObject().SetPropertyValue(name, gValue)
+}
+
+func setOptionalGstEnumProperty(element *gst.Element, name string, value int) error {
+	if _, err := element.GObject().GetPropertyType(name); err != nil {
+		return nil
+	}
+	return setGstEnumProperty(element, name, value)
+}
+
+func setOptionalGstProperty(element *gst.Element, name string, value interface{}) error {
+	if _, err := element.GObject().GetPropertyType(name); err != nil {
+		return nil
+	}
+	return element.SetProperty(name, value)
+}
+
+func preferNVENC() bool {
+	switch os.Getenv("CARTHA_EGRESS_PREFER_NVENC") {
+	case "1", "true", "TRUE", "yes", "YES", "on", "ON":
+		return true
+	}
+	// The GPU canary deployment sets this, which keeps production CPU egress on
+	// software encoders unless explicitly opted into NVENC.
+	return os.Getenv("CARTHA_EGRESS_GPU_PROFILE") != ""
 }
 
 type VideoBin struct {
@@ -613,6 +638,113 @@ func (b *VideoBin) addSelector() error {
 	return nil
 }
 
+func (b *VideoBin) addSoftwareH265Encoder() error {
+	x265Enc, err := gst.NewElement("x265enc")
+	if err != nil {
+		return errors.ErrGstPipelineError(err)
+	}
+
+	// H265 was originally added with the same "veryfast" preset used for
+	// H264. In real RoomComposite egress that can still run behind at
+	// 1080p on the 4-vCPU canary workers, leaving the pipeline stuck in EOS
+	// finalization and eventually reported as "pipeline frozen". Prefer
+	// realtime stability over max compression for the canary path.
+	x265Enc.SetArg("speed-preset", "ultrafast")
+	x265Enc.SetArg("tune", "zerolatency")
+
+	if b.conf.KeyFrameInterval != 0 {
+		// x265enc exposes key-int-max as a signed gint, unlike x264enc's
+		// guint property. Passing uint fails the pipeline at runtime with:
+		// "invalid type guint for property key-int-max".
+		keyframeInterval := int(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
+		if err = x265Enc.SetProperty("key-int-max", keyframeInterval); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+	}
+
+	if err = x265Enc.SetProperty("bitrate", uint(b.conf.VideoBitrate)); err != nil {
+		return errors.ErrGstPipelineError(err)
+	}
+
+	return b.addH265ParserAndCaps(x265Enc)
+}
+
+func (b *VideoBin) addNVENCH265Encoder() (bool, error) {
+	// nvcodec registers nvautogpuh265enc only when libcuda/libnvidia-encode and
+	// an NVENC-capable GPU are visible inside the container. That is true on the
+	// G6f canary nodes via the NVIDIA device plugin, but false on local Macs and
+	// CPU-only egress nodes. Fall back to x265enc when the element is unavailable.
+	nvEnc, err := gst.NewElement("nvautogpuh265enc")
+	if err != nil {
+		logger.Infow("NVENC H265 encoder unavailable; falling back to x265enc", "error", err)
+		return false, nil
+	}
+
+	// GStreamer 1.24 nvcodec enum values:
+	// preset p3=10, tune low-latency=2, multi-pass disabled=1, rate-control cbr=2.
+	// Keep B-frames/reorder disabled for realtime egress finalization safety.
+	if err = setOptionalGstEnumProperty(nvEnc, "preset", 10); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if err = setOptionalGstEnumProperty(nvEnc, "tune", 2); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if err = setOptionalGstEnumProperty(nvEnc, "multi-pass", 1); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if err = setOptionalGstEnumProperty(nvEnc, "rate-control", 2); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if err = setOptionalGstProperty(nvEnc, "b-frames", uint(0)); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if err = setOptionalGstProperty(nvEnc, "zero-reorder-delay", true); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if err = setOptionalGstProperty(nvEnc, "repeat-sequence-header", true); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if err = setOptionalGstProperty(nvEnc, "bitrate", uint(b.conf.VideoBitrate)); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if err = setOptionalGstProperty(nvEnc, "max-bitrate", uint(b.conf.VideoBitrate)); err != nil {
+		return false, errors.ErrGstPipelineError(err)
+	}
+	if b.conf.KeyFrameInterval != 0 {
+		keyframeInterval := int(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
+		if err = setOptionalGstProperty(nvEnc, "gop-size", keyframeInterval); err != nil {
+			return false, errors.ErrGstPipelineError(err)
+		}
+	}
+
+	logger.Infow("using NVENC H265 encoder", "element", "nvautogpuh265enc", "bitrateKbps", b.conf.VideoBitrate)
+	return true, b.addH265ParserAndCaps(nvEnc)
+}
+
+func (b *VideoBin) addH265ParserAndCaps(encoder *gst.Element) error {
+	h265Parse, err := gst.NewElement("h265parse")
+	if err != nil {
+		return errors.ErrGstPipelineError(err)
+	}
+	// Keep parameter sets in-band so finalized MP4s are self-contained.
+	_ = h265Parse.SetProperty("config-interval", int(-1))
+
+	caps, err := gst.NewElement("capsfilter")
+	if err != nil {
+		return errors.ErrGstPipelineError(err)
+	}
+	if err = caps.SetProperty("caps", gst.NewCapsFromString(
+		"video/x-h265,profile=main,stream-format=hvc1,alignment=au",
+	)); err != nil {
+		return errors.ErrGstPipelineError(err)
+	}
+
+	if err = b.bin.AddElements(encoder, h265Parse, caps); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (b *VideoBin) addEncoder() error {
 	videoQueue, err := gstreamer.BuildQueue("video_encoder_queue", b.conf.Latency.PipelineLatency, false)
 	if err != nil {
@@ -692,54 +824,15 @@ func (b *VideoBin) addEncoder() error {
 		return nil
 
 	case types.MimeTypeH265:
-		x265Enc, err := gst.NewElement("x265enc")
-		if err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-
-		// H265 was originally added with the same "veryfast" preset used for
-		// H264. In real RoomComposite egress that can still run behind at
-		// 1080p on the 4-vCPU canary workers, leaving the pipeline stuck in EOS
-		// finalization and eventually reported as "pipeline frozen". Prefer
-		// realtime stability over max compression for the canary path.
-		x265Enc.SetArg("speed-preset", "ultrafast")
-		x265Enc.SetArg("tune", "zerolatency")
-
-		if b.conf.KeyFrameInterval != 0 {
-			// x265enc exposes key-int-max as a signed gint, unlike x264enc's
-			// guint property. Passing uint fails the pipeline at runtime with:
-			// "invalid type guint for property key-int-max".
-			keyframeInterval := int(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
-			if err = x265Enc.SetProperty("key-int-max", keyframeInterval); err != nil {
-				return errors.ErrGstPipelineError(err)
+		if preferNVENC() {
+			if ok, err := b.addNVENCH265Encoder(); err != nil {
+				return err
+			} else if ok {
+				return nil
 			}
 		}
 
-		if err = x265Enc.SetProperty("bitrate", uint(b.conf.VideoBitrate)); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-
-		h265Parse, err := gst.NewElement("h265parse")
-		if err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		// Keep parameter sets in-band so finalized MP4s are self-contained.
-		_ = h265Parse.SetProperty("config-interval", int(-1))
-
-		caps, err := gst.NewElement("capsfilter")
-		if err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		if err = caps.SetProperty("caps", gst.NewCapsFromString(
-			"video/x-h265,profile=main,stream-format=hvc1,alignment=au",
-		)); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-
-		if err = b.bin.AddElements(x265Enc, h265Parse, caps); err != nil {
-			return err
-		}
-		return nil
+		return b.addSoftwareH265Encoder()
 
 	case types.MimeTypeAV1:
 		av1Enc, err := gst.NewElement("av1enc")

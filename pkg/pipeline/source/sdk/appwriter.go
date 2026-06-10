@@ -87,6 +87,7 @@ type AppWriter struct {
 	samplesCond *sync.Cond
 
 	translator  Translator
+	av1OBU      *codecs.AV1Depacketizer // AV1: reassemble RTP into an OBU stream (image lacks rtpav1depay)
 	callbacks   *gstreamer.Callbacks
 	sendPLI     func()
 	pliThrottle core.Throttle
@@ -215,6 +216,16 @@ func NewAppWriter(
 	case types.MimeTypeVP9:
 		depacketizer = &codecs.VP9Packet{}
 		w.translator = NewNullTranslator()
+
+	case types.MimeTypeAV1:
+		// AV1 ingest: the egress image has no rtpav1depay, so the jitter buffer
+		// uses pion's AV1Depacketizer purely for frame-boundary detection while a
+		// separate instance reassembles OBUs in pushPacket for a video/x-av1
+		// appsrc (av1parse ! av1dec downstream). Capable-Android AV1 publishers
+		// were previously dropped at ingest (recorded only via their H264 backup).
+		depacketizer = &codecs.AV1Depacketizer{}
+		w.translator = NewNullTranslator()
+		w.av1OBU = &codecs.AV1Depacketizer{}
 
 	default:
 		return nil, errors.ErrNotSupported(string(ts.MimeType))
@@ -562,11 +573,29 @@ func (w *AppWriter) pushPacket(pkt jitter.ExtPacket) error {
 		return nil
 	}
 
-	p, err := pkt.Marshal()
-	if err != nil {
-		w.stats.packetsDropped.Inc()
-		w.logger.Errorw("could not marshal packet", err)
-		return err
+	var p []byte
+	if w.av1OBU != nil {
+		// AV1 ingest: reassemble the OBU stream in-process and push OBUs to the
+		// video/x-av1 appsrc (no rtpav1depay in the image). Defensive — drop
+		// undecodable packets and skip mid-fragment returns rather than risk the
+		// pipeline, so a malformed AV1 stream degrades to no recording (the
+		// publisher's H264 backup still records) instead of crashing the worker.
+		p, err = w.av1OBU.Unmarshal(pkt.Packet.Payload)
+		if err != nil {
+			w.stats.packetsDropped.Inc()
+			w.logger.Debugw("av1 OBU depacketize failed, dropping packet", "error", err)
+			return nil
+		}
+		if len(p) == 0 {
+			return nil
+		}
+	} else {
+		p, err = pkt.Marshal()
+		if err != nil {
+			w.stats.packetsDropped.Inc()
+			w.logger.Errorw("could not marshal packet", err)
+			return err
+		}
 	}
 
 	b := gst.NewBufferFromBytes(p)

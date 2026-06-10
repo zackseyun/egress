@@ -590,6 +590,40 @@ func (b *VideoBin) buildAppSrcBin(ts *config.TrackSource, name string) (*gstream
 			return nil, err
 		}
 
+	case types.MimeTypeAV1:
+		// AV1 ingest: the appwriter reassembles the RTP stream into an OBU stream
+		// in-process (rtpav1depay is not in the image), so the appsrc carries
+		// video/x-av1 directly — av1parse normalizes temporal units and av1dec
+		// decodes. This lets hardware-AV1 Android publishers be recorded at full
+		// AV1 quality rather than only via their H264 backup. NOTE: the pion-OBU
+		// framing is unvalidated against a live AV1 sender; if it is wrong the
+		// stream simply fails to record (publisher H264 backup still covers it).
+		if err := ts.AppSrc.SetProperty("caps", gst.NewCapsFromString(
+			"video/x-av1,stream-format=obu-stream,alignment=tu",
+		)); err != nil {
+			return nil, errors.ErrGstPipelineError(err)
+		}
+
+		av1Parse, err := gst.NewElement("av1parse")
+		if err != nil {
+			return nil, errors.ErrGstPipelineError(err)
+		}
+		if err = appSrcBin.AddElement(av1Parse); err != nil {
+			return nil, err
+		}
+
+		if !b.conf.VideoDecoding {
+			return appSrcBin, nil
+		}
+
+		av1Dec, err := gst.NewElement("av1dec")
+		if err != nil {
+			return nil, errors.ErrGstPipelineError(err)
+		}
+		if err = appSrcBin.AddElement(av1Dec); err != nil {
+			return nil, err
+		}
+
 	default:
 		return nil, errors.ErrNotSupported(string(ts.MimeType))
 	}

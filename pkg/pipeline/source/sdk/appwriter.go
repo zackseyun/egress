@@ -199,6 +199,15 @@ func NewAppWriter(
 		depacketizer = &codecs.H264Packet{}
 		w.translator = NewNullTranslator()
 
+	case types.MimeTypeH265:
+		// pion 1.10.1 exposes H265 frame-boundary detection via the dedicated
+		// H265Depacketizer (H265Packet itself no longer implements the
+		// rtp.Depacketizer interface). The jitter buffer only calls
+		// IsPartitionHead/IsPartitionTail; raw RTP is still forwarded to GStreamer's
+		// rtph265depay, which performs the actual NAL reassembly.
+		depacketizer = &codecs.H265Depacketizer{}
+		w.translator = NewNullTranslator()
+
 	case types.MimeTypeVP8:
 		depacketizer = &codecs.VP8Packet{}
 		w.translator = NewVP8Translator(w.logger)

@@ -465,6 +465,57 @@ func (b *VideoBin) buildAppSrcBin(ts *config.TrackSource, name string) (*gstream
 			return nil, err
 		}
 
+	case types.MimeTypeH265:
+		// Hardware-H265 publishers (every modern iPhone via VideoToolbox) were
+		// previously dropped at ingest with ErrNotSupported, so their participant
+		// egress produced no file and their composite tile rendered black. All
+		// three elements (rtph265depay, h265parse, avdec_h265) are present in the
+		// egress image; mirror the H264 path so the SDK source can decode HEVC and
+		// re-encode to the configured recording codec (AV1).
+		if err := ts.AppSrc.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
+			"application/x-rtp,media=video,payload=%d,encoding-name=H265,clock-rate=%d",
+			ts.PayloadType, ts.ClockRate,
+		))); err != nil {
+			return nil, errors.ErrGstPipelineError(err)
+		}
+
+		rtpH265Depay, err := gst.NewElement("rtph265depay")
+		if err != nil {
+			return nil, errors.ErrGstPipelineError(err)
+		}
+		if err = appSrcBin.AddElement(rtpH265Depay); err != nil {
+			return nil, err
+		}
+
+		if !b.conf.VideoDecoding {
+			h265ParseFixer, err := newPTSFixer("h265parse", fmt.Sprintf("track:%s", ts.TrackID))
+			if err != nil {
+				return nil, err
+			}
+
+			if err = appSrcBin.AddElement(h265ParseFixer.Element); err != nil {
+				return nil, err
+			}
+
+			return appSrcBin, nil
+		}
+
+		// h265parse normalizes byte-stream NALs and surfaces VPS/SPS/PPS so
+		// avdec_h265 negotiates reliably; HEVC is less forgiving than H264 here.
+		h265Parse, err := gst.NewElement("h265parse")
+		if err != nil {
+			return nil, errors.ErrGstPipelineError(err)
+		}
+
+		avDecH265, err := gst.NewElement("avdec_h265")
+		if err != nil {
+			return nil, errors.ErrGstPipelineError(err)
+		}
+
+		if err = appSrcBin.AddElements(h265Parse, avDecH265); err != nil {
+			return nil, err
+		}
+
 	case types.MimeTypeVP8:
 		if err := ts.AppSrc.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
 			"application/x-rtp,media=video,payload=%d,encoding-name=VP8,clock-rate=%d",
@@ -742,6 +793,26 @@ func (b *VideoBin) addEncoder() error {
 		return nil
 
 	case types.MimeTypeAV1:
+		// Force 4:2:0 at the encoder input. The headless-Chrome RoomComposite
+		// source negotiates 4:4:4, which made av1enc emit AV1 High / yuv444p — a
+		// profile no mobile hardware decoder can play, forcing software decode on
+		// every viewer (and oversized files). A videoconvert + I420 capsfilter
+		// pins Main / 4:2:0. SDK participant sources are already I420, so this is a
+		// passthrough no-op there.
+		av1InputConvert, err := gst.NewElement("videoconvert")
+		if err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		av1InputCaps, err := gst.NewElement("capsfilter")
+		if err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+		if err = av1InputCaps.SetProperty("caps", gst.NewCapsFromString(
+			"video/x-raw,format=I420",
+		)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+
 		av1Enc, err := gst.NewElement("av1enc")
 		if err != nil {
 			return errors.ErrGstPipelineError(err)
@@ -805,7 +876,7 @@ func (b *VideoBin) addEncoder() error {
 			return errors.ErrGstPipelineError(err)
 		}
 
-		if err = b.bin.AddElements(av1Enc, av1Parse, caps); err != nil {
+		if err = b.bin.AddElements(av1InputConvert, av1InputCaps, av1Enc, av1Parse, caps); err != nil {
 			return err
 		}
 		return nil

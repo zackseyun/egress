@@ -16,7 +16,24 @@ ARG TEMPLATE_TAG=latest
 
 FROM livekit/egress-templates:$TEMPLATE_TAG AS template
 
-FROM livekit/gstreamer:1.24.12-dev
+# Build the SVT-AV1 GStreamer encoder plugin (svtav1enc) against the pinned
+# GStreamer 1.24.12. The upstream livekit/gstreamer image is built without
+# libsvtav1enc-dev, so svtav1enc is absent; building just this one plugin avoids
+# a full from-source GStreamer base rebuild. video.go prefers svtav1enc (fast
+# realtime AV1 on the CPU-only c7g nodes) and falls back to libaom av1enc.
+FROM livekit/gstreamer:1.24.12-dev AS svtav1
+ARG SVT_GST_BAD_VERSION=1.24.12
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsvtav1enc-dev wget xz-utils && \
+    cd /tmp && \
+    wget -q https://gstreamer.freedesktop.org/src/gst-plugins-bad/gst-plugins-bad-${SVT_GST_BAD_VERSION}.tar.xz && \
+    tar xf gst-plugins-bad-${SVT_GST_BAD_VERSION}.tar.xz && \
+    cd gst-plugins-bad-${SVT_GST_BAD_VERSION} && \
+    meson setup build -Dauto_features=disabled -Dsvtav1=enabled && \
+    ninja -C build && \
+    install -D build/ext/svtav1/libgstsvtav1.so /out/libgstsvtav1.so
+
+FROM livekit/gstreamer:1.24.12-dev AS builder
 
 ARG TARGETPLATFORM
 ARG TARGETARCH
@@ -79,14 +96,20 @@ RUN /chrome-installer/install-chrome "$TARGETPLATFORM"
 # clean up
 RUN rm -rf /var/lib/apt/lists/*
 
+# SVT-AV1: runtime library + the svtav1enc plugin built in the svtav1 stage.
+# Installs into the same plugin dir as the existing libgstaom.so (av1enc).
+RUN apt-get update && apt-get install -y --no-install-recommends libsvtav1enc1d1 && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=svtav1 /out/libgstsvtav1.so /usr/lib/aarch64-linux-gnu/gstreamer-1.0/
+
 # create egress user
 RUN useradd -ms /bin/bash -g root -G sudo,pulse,pulse-access egress
 RUN mkdir -p home/egress/tmp home/egress/.cache/xdgr && \
     chown -R egress /home/egress
 
 # copy files
-COPY --from=1 /workspace/egress /bin/
-COPY --from=1 /tini /tini
+COPY --from=builder /workspace/egress /bin/
+COPY --from=builder /tini /tini
 COPY build/egress/entrypoint.sh /
 
 # run

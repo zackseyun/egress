@@ -813,52 +813,79 @@ func (b *VideoBin) addEncoder() error {
 			return errors.ErrGstPipelineError(err)
 		}
 
-		av1Enc, err := gst.NewElement("av1enc")
-		if err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-
-		// Keep the canary viable on CPU-only c7g egress nodes. AV1 quality is
-		// still better than H264 at similar bitrates, but realtime-ish settings are
-		// necessary so room recordings can finalize without falling hopelessly behind.
-		// usage-profile is a GstAV1EncUsageProfile enum. go-glib converts a
-		// plain int into G_TYPE_INT, which GStreamer rejects at runtime with:
-		// "invalid type gint for property usage-profile". Build a native enum
-		// GValue instead.
-		if err = setGstEnumProperty(av1Enc, "usage-profile", 1); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		// The GStreamer av1enc defaults leave max-quantizer at 0. In realtime
-		// mode that effectively lets libaom emit near-lossless frames and ignore
-		// the requested target-bitrate, producing huge MP4s (for example 50+Mbps
-		// from a 9Mbps room request). Use realtime CBR plus a sane quantizer range
-		// so AV1 behaves like a bitrate-targeted recording codec.
-		if err = setGstEnumProperty(av1Enc, "end-usage", 1); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		if err = av1Enc.SetProperty("min-quantizer", uint(4)); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		if err = av1Enc.SetProperty("max-quantizer", uint(56)); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		if err = av1Enc.SetProperty("cpu-used", int(8)); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		if err = av1Enc.SetProperty("row-mt", true); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		if err = av1Enc.SetProperty("threads", uint(0)); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		if b.conf.KeyFrameInterval != 0 {
-			keyframeInterval := int(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
-			if err = av1Enc.SetProperty("keyframe-max-dist", keyframeInterval); err != nil {
+		// Prefer SVT-AV1 (svtav1enc): a realtime-tuned encoder that is dramatically
+		// faster than libaom av1enc on the CPU-only c7g Graviton egress nodes
+		// (strong NEON throughput). Together with the 30fps composite drop this
+		// relieves the egress CPU starvation behind "no response from servers".
+		// Fall back to libaom av1enc when the svtav1 plugin is absent so AV1 egress
+		// never hard-breaks on an image that lacks it.
+		av1Enc, err := gst.NewElement("svtav1enc")
+		useSvtAv1 := err == nil && av1Enc != nil
+		if !useSvtAv1 {
+			av1Enc, err = gst.NewElement("av1enc")
+			if err != nil {
 				return errors.ErrGstPipelineError(err)
 			}
 		}
-		if err = av1Enc.SetProperty("target-bitrate", uint(b.conf.VideoBitrate)); err != nil {
-			return errors.ErrGstPipelineError(err)
+
+		if useSvtAv1 {
+			// preset 0..13 (0 = best quality, 13 = fastest). 10 is the realtime
+			// default and keeps 1080p encodes ahead of realtime on c7g.
+			if err = av1Enc.SetProperty("preset", uint(10)); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+			// target-bitrate is in kbits/sec, matching b.conf.VideoBitrate (e.g.
+			// 1875 participant / 6000 composite). SVT honors it far more tightly
+			// than libaom, so no quantizer clamp is required to avoid ballooning.
+			if err = av1Enc.SetProperty("target-bitrate", uint(b.conf.VideoBitrate)); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+			// Closed-GOP IDR keyframes at the requested interval (in frames).
+			if b.conf.KeyFrameInterval != 0 {
+				intra := int(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
+				if err = av1Enc.SetProperty("intra-period-length", intra); err != nil {
+					return errors.ErrGstPipelineError(err)
+				}
+			}
+			// 0 = use all available logical cores.
+			if err = av1Enc.SetProperty("logical-processors", uint(0)); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+		} else {
+			// libaom av1enc fallback (slower). usage-profile/end-usage are
+			// GstAV1Enc enums; go-glib needs a native enum GValue. The quantizer
+			// clamp keeps libaom from ignoring target-bitrate and ballooning to
+			// 50+Mbps in realtime mode.
+			if err = setGstEnumProperty(av1Enc, "usage-profile", 1); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+			if err = setGstEnumProperty(av1Enc, "end-usage", 1); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+			if err = av1Enc.SetProperty("min-quantizer", uint(4)); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+			if err = av1Enc.SetProperty("max-quantizer", uint(56)); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+			if err = av1Enc.SetProperty("cpu-used", int(8)); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+			if err = av1Enc.SetProperty("row-mt", true); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+			if err = av1Enc.SetProperty("threads", uint(0)); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
+			if b.conf.KeyFrameInterval != 0 {
+				keyframeInterval := int(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
+				if err = av1Enc.SetProperty("keyframe-max-dist", keyframeInterval); err != nil {
+					return errors.ErrGstPipelineError(err)
+				}
+			}
+			if err = av1Enc.SetProperty("target-bitrate", uint(b.conf.VideoBitrate)); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
 		}
 
 		av1Parse, err := gst.NewElement("av1parse")
